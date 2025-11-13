@@ -61,7 +61,7 @@ async function getEthToUsdRate() {
 // Fetch orderbook for an item (aggregated price levels)
 async function fetchOrderbook(itemId) {
   try {
-    const API_URL = 'https://test-giga.onrender.com';
+    const API_URL = 'https://juiced.sh';
     const response = await fetch(`${API_URL}/api/orderbook/${itemId}`);
     if (!response.ok) {
       throw new Error(`Orderbook API error: ${response.status}`);
@@ -77,7 +77,7 @@ async function fetchOrderbook(itemId) {
 // Fetch listings for an item with owner info
 async function fetchListingsForItem(itemId) {
   try {
-    const API_URL = 'https://test-giga.onrender.com';
+    const API_URL = 'https://juiced.sh';
     const response = await fetch(`${API_URL}/api/listings?itemId=${itemId}`);
     if (!response.ok) {
       throw new Error(`Listings API error: ${response.status}`);
@@ -93,7 +93,7 @@ async function fetchListingsForItem(itemId) {
 // Fetch PNL data for a user address
 async function fetchUserPnL(address, itemId) {
   try {
-    const API_URL = 'https://test-giga.onrender.com';
+    const API_URL = 'https://juiced.sh';
     const response = await fetch(`${API_URL}/api/user-pnl/${address}`);
     if (!response.ok) {
       throw new Error(`PNL API error: ${response.status}`);
@@ -280,7 +280,7 @@ async function sendDirectMessage(discordUsername, message, itemId = null, condit
 
     // If itemId is provided, send embed with image
     if (itemId) {
-      const imageUrl = `https://test-giga.onrender.com/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
+      const imageUrl = `https://juiced.sh/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
 
       // Determine embed color based on condition
       let embedColor = 0x8b5cf6; // Purple default
@@ -392,7 +392,7 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
 
     // Send message in the thread (with embed if itemId provided)
     if (itemId) {
-      const imageUrl = `https://test-giga.onrender.com/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
+      const imageUrl = `https://juiced.sh/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
 
       // Determine embed color based on condition
       let embedColor = 0x8b5cf6; // Purple default
@@ -440,7 +440,7 @@ async function sendTelegramMessage(telegramUsername, message, itemId = null, con
     if (itemId) {
       // Add cache-busting timestamp to force Telegram to fetch new image
       const cacheBuster = Date.now();
-      const imageUrl = `https://test-giga.onrender.com/api/telegram-icon/${itemId}?condition=${condition}&v=${cacheBuster}`;
+      const imageUrl = `https://juiced.sh/api/telegram-icon/${itemId}?condition=${condition}&v=${cacheBuster}`;
       console.log(`[TELEGRAM] Sending photo to ${telegramUsername} (${chatId}):`, { itemId, condition, imageUrl });
       await telegramBot.sendPhoto(chatId, imageUrl, {
         caption: message,
