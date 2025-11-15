@@ -421,7 +421,11 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
 
     return true;
   } catch (error) {
-    console.error(`Failed to find/create private thread for ${discordUsername}:`, error.message);
+    console.error(`Failed to find/create private thread for ${discordUsername}:`, {
+      message: error.message,
+      code: error.code,
+      stack: error.stack
+    });
     if (channel && member && (error.code === 50013 || /Missing Permissions/i.test(error.message))) {
       const fallbackSent = await sendChannelAlert(channel, member, message, itemId, condition);
       if (fallbackSent) {
