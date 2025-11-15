@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const TelegramBot = require('node-telegram-bot-api');
 const initTelegramCommands = require('./telegram-commands');
@@ -308,8 +308,6 @@ async function sendDirectMessage(discordUsername, message, itemId = null, condit
 
     // If itemId is provided, send embed with image
     if (itemId) {
-      const imageUrl = `${API_BASE_URL}/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
-
       // Determine embed color based on condition
       let embedColor = 0x8b5cf6; // Purple default
       if (condition === 'above') embedColor = 0x10b981; // Green
@@ -319,11 +317,26 @@ async function sendDirectMessage(discordUsername, message, itemId = null, condit
 
       const embed = new EmbedBuilder()
         .setDescription(message)
-        .setImage(imageUrl)
         .setColor(embedColor)
         .setTimestamp();
 
-      await member.send({ embeds: [embed] });
+      let files = undefined;
+      if (itemId) {
+        const payload = await getTelegramIconPayload(itemId, condition);
+        if (payload.type === 'buffer') {
+          const attachmentName = `discord-icon-${itemId}-${condition}.png`;
+          files = [new AttachmentBuilder(payload.value, { name: attachmentName })];
+          embed.setImage(`attachment://${attachmentName}`);
+        } else {
+          embed.setImage(payload.value);
+        }
+      }
+
+      const sendOptions = { embeds: [embed] };
+      if (files) {
+        sendOptions.files = files;
+      }
+      await member.send(sendOptions);
     } else {
       // Send plain text message
       await member.send(message);
@@ -408,8 +421,6 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
 
     // Send message in the thread (with embed if itemId provided)
     if (itemId) {
-      const imageUrl = `${API_BASE_URL}/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
-
       // Determine embed color based on condition
       let embedColor = 0x8b5cf6; // Purple default
       if (condition === 'above') embedColor = 0x10b981; // Green
@@ -419,11 +430,24 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
 
       const embed = new EmbedBuilder()
         .setDescription(`<@${member.user.id}> ${message}`)
-        .setImage(imageUrl)
         .setColor(embedColor)
         .setTimestamp();
 
-      await thread.send({ embeds: [embed] });
+      let files = undefined;
+      const payload = await getTelegramIconPayload(itemId, condition);
+      if (payload.type === 'buffer') {
+        const attachmentName = `thread-icon-${itemId}-${condition}.png`;
+        files = [new AttachmentBuilder(payload.value, { name: attachmentName })];
+        embed.setImage(`attachment://${attachmentName}`);
+      } else {
+        embed.setImage(payload.value);
+      }
+
+      const sendOptions = { embeds: [embed] };
+      if (files) {
+        sendOptions.files = files;
+      }
+      await thread.send(sendOptions);
     } else {
       // Send plain text message
       await thread.send(`<@${member.user.id}> ${message}`);
@@ -433,6 +457,38 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
   } catch (error) {
     console.error(`Failed to find/create private thread for ${discordUsername}:`, error.message);
     return false;
+  }
+}
+
+const TELEGRAM_ICON_TTL_MS = parseInt(process.env.TELEGRAM_ICON_TTL_MS || '120000', 10);
+const telegramIconPayloadCache = new Map(); // key -> { expiresAt, data }
+
+async function getTelegramIconPayload(itemId, condition) {
+  const cacheKey = `${itemId}_${condition}`;
+  const cached = telegramIconPayloadCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+
+  const cacheBuster = Date.now();
+  const url = `${API_BASE_URL}/api/telegram-icon/${itemId}?condition=${condition}&v=${cacheBuster}`;
+
+  try {
+    const response = await fetch(url, { headers: { 'X-App-Version': APP_VERSION } });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const payload = { type: 'buffer', value: buffer };
+    telegramIconPayloadCache.set(cacheKey, { expiresAt: Date.now() + TELEGRAM_ICON_TTL_MS, data: payload });
+    return payload;
+  } catch (error) {
+    console.warn(`[TELEGRAM] Icon fetch failed (${error.message}) for ${cacheKey}`);
+    if (cached) {
+      return cached.data;
+    }
+    return { type: 'url', value: url };
   }
 }
 
@@ -454,23 +510,10 @@ async function sendTelegramMessage(telegramUsername, message, itemId = null, con
 
     // If itemId is provided, send photo with caption
     if (itemId) {
-      // Add cache-busting timestamp to force Telegram to fetch new image
-      const cacheBuster = Date.now();
-      const imageUrl = `${API_BASE_URL}/api/telegram-icon/${itemId}?condition=${condition}&v=${cacheBuster}`;
-      let photoPayload = imageUrl;
-      try {
-        const response = await fetch(imageUrl, { headers: { 'X-App-Version': APP_VERSION } });
-        if (response.ok) {
-          const buffer = Buffer.from(await response.arrayBuffer());
-          photoPayload = buffer;
-        } else {
-          console.warn(`[TELEGRAM] Icon fetch ${response.status} - falling back to URL`);
-        }
-      } catch (error) {
-        console.warn('[TELEGRAM] Icon fetch failed, using URL:', error.message);
-      }
+      const payload = await getTelegramIconPayload(itemId, condition);
+      const photoArg = payload.type === 'buffer' ? payload.value : payload.value;
 
-      await telegramBot.sendPhoto(chatId, photoPayload, {
+      await telegramBot.sendPhoto(chatId, photoArg, {
         caption: message,
         parse_mode: 'Markdown'
       });
@@ -1000,14 +1043,15 @@ async function checkUndercutNotifications() {
           .join('\n');
 
         const userPriceFormatted = userPrice.toFixed(6).replace(/\.?0+$/, '');
+        const undercutSumEth = totalEthValue.toFixed(6).replace(/\.?0+$/, '');
+        const undercutSumUsd = totalUsdValue.toFixed(2);
         const message = `🪓 **Price Undercut** 🪓
 **${listing.item_name}**
 Your price: **${userPriceFormatted} ETH** ($${(userPrice * ethToUsdRate).toFixed(2)})
+Undercut sum: **${undercutSumEth} ETH** ($${undercutSumUsd})
 
 **${totalAmount} items** below your price:
-${undercutDetails}${undercutListings.length > 3 ? `\n...` : ''}
-
-Undercut volume: **${totalEthValue.toFixed(6).replace(/\.?0+$/, '')} ETH** ($${totalUsdValue.toFixed(2)})`;
+${undercutDetails}${undercutListings.length > 3 ? `\n...` : ''}`;
 
         // Route notification based on channel
         const username = alert.notification_channel === 'telegram' ? alert.telegram_username : alert.discord_username;
