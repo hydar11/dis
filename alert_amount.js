@@ -355,10 +355,6 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
       return await sendChannelAlert(channel, member, message, itemId, condition);
     }
 
-    // Fetch all threads to ensure cache is updated
-    await channel.threads.fetchActive();
-    await channel.threads.fetchArchived();
-
     // Look for existing private thread for this user
     const existingThread = channel.threads.cache.find(thread =>
       thread.name === `Alert for ${member.displayName}` &&
@@ -390,7 +386,7 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
           });
         } catch (publicError) {
           console.error(` Public thread also failed:`, publicError.message);
-          throw new Error(`Both private and public thread creation failed`);
+          throw publicError;
         }
       }
 
