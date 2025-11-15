@@ -549,18 +549,14 @@ async function sendTelegramMessage(telegramUsername, message, itemId = null, con
     // If itemId is provided, send photo with caption
     if (itemId) {
       const payload = await getTelegramIconPayload(itemId, condition);
-      let photoArg = payload.value;
-      if (payload.type === 'buffer') {
-        photoArg = {
-          value: payload.value,
-          options: { filename: `telegram-icon-${itemId}-${condition}.png`, contentType: 'image/png' }
-        };
-      }
+      const fileOptions = payload.type === 'buffer'
+        ? { filename: `telegram-icon-${itemId}-${condition}.png`, contentType: 'image/png' }
+        : undefined;
 
-      await telegramBot.sendPhoto(chatId, photoArg, {
+      await telegramBot.sendPhoto(chatId, payload.value, {
         caption: message,
         parse_mode: 'Markdown'
-      });
+      }, fileOptions);
       console.log(`[TELEGRAM] ✅ Photo sent successfully to ${telegramUsername}`);
     } else {
       // Send text-only message
