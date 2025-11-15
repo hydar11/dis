@@ -308,30 +308,7 @@ async function sendDirectMessage(discordUsername, message, itemId = null, condit
 
     // If itemId is provided, send embed with image
     if (itemId) {
-      // Determine embed color based on condition
-      let embedColor = 0x8b5cf6; // Purple default
-      if (condition === 'above') embedColor = 0x10b981; // Green
-      else if (condition === 'below') embedColor = 0xef4444; // Red
-      else if (condition === 'sold') embedColor = 0xf59e0b; // Orange
-      else if (condition === 'undercut') embedColor = 0x06b6d4; // Cyan
-
-      const embed = new EmbedBuilder()
-        .setDescription(message)
-        .setColor(embedColor)
-        .setTimestamp();
-
-      let files = undefined;
-      if (itemId) {
-        const payload = await getTelegramIconPayload(itemId, condition);
-        if (payload.type === 'buffer') {
-          const attachmentName = `discord-icon-${itemId}-${condition}.png`;
-          files = [new AttachmentBuilder(payload.value, { name: attachmentName })];
-          embed.setImage(`attachment://${attachmentName}`);
-        } else {
-          embed.setImage(payload.value);
-        }
-      }
-
+      const { embed, files } = await buildEmbedWithIcon(message, itemId, condition, 'dm');
       const sendOptions = { embeds: [embed] };
       if (files) {
         sendOptions.files = files;
@@ -351,20 +328,21 @@ async function sendDirectMessage(discordUsername, message, itemId = null, condit
 
 // Function to find or create private thread for user (with optional embed image)
 async function findOrCreatePrivateThread(discordUsername, message, itemId = null, condition = 'above') {
+  let member = null;
+  let channel = null;
   try {
     const guild = client.guilds.cache.get(GUILD_ID);
     if (!guild) {
       throw new Error('Guild not found');
     }
 
-    const member = await findDiscordMember(discordUsername);
-
+    member = await findDiscordMember(discordUsername);
     if (!member) {
       console.error(`User ${discordUsername} not found for private thread`);
       return false;
     }
 
-    const channel = guild.channels.cache.get(NOTIFICATION_CHANNEL_ID);
+    channel = guild.channels.cache.get(NOTIFICATION_CHANNEL_ID);
     if (!channel) {
       throw new Error('Notification channel not found');
     }
@@ -374,6 +352,7 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
     const permissions = botMember.permissionsIn(channel);
     if (!permissions.has('CreatePrivateThreads')) {
       console.warn(`⚠️ Bot missing CreatePrivateThreads permission in channel ${channel.name}`);
+      return await sendChannelAlert(channel, member, message, itemId, condition);
     }
 
     // Fetch all threads to ensure cache is updated
@@ -416,33 +395,16 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
       }
 
       // Add the user to the thread
-      await thread.members.add(member.user.id);
+      try {
+        await thread.members.add(member.user.id);
+      } catch (addError) {
+        console.warn(` Unable to add ${member.displayName} to thread:`, addError.message);
+      }
     }
 
     // Send message in the thread (with embed if itemId provided)
     if (itemId) {
-      // Determine embed color based on condition
-      let embedColor = 0x8b5cf6; // Purple default
-      if (condition === 'above') embedColor = 0x10b981; // Green
-      else if (condition === 'below') embedColor = 0xef4444; // Red
-      else if (condition === 'sold') embedColor = 0xf59e0b; // Orange
-      else if (condition === 'undercut') embedColor = 0x06b6d4; // Cyan
-
-      const embed = new EmbedBuilder()
-        .setDescription(`<@${member.user.id}> ${message}`)
-        .setColor(embedColor)
-        .setTimestamp();
-
-      let files = undefined;
-      const payload = await getTelegramIconPayload(itemId, condition);
-      if (payload.type === 'buffer') {
-        const attachmentName = `thread-icon-${itemId}-${condition}.png`;
-        files = [new AttachmentBuilder(payload.value, { name: attachmentName })];
-        embed.setImage(`attachment://${attachmentName}`);
-      } else {
-        embed.setImage(payload.value);
-      }
-
+      const { embed, files } = await buildEmbedWithIcon(`<@${member.user.id}> ${message}`, itemId, condition, 'thread');
       const sendOptions = { embeds: [embed] };
       if (files) {
         sendOptions.files = files;
@@ -456,6 +418,12 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
     return true;
   } catch (error) {
     console.error(`Failed to find/create private thread for ${discordUsername}:`, error.message);
+    if (channel && member && (error.code === 50013 || /Missing Permissions/i.test(error.message))) {
+      const fallbackSent = await sendChannelAlert(channel, member, message, itemId, condition);
+      if (fallbackSent) {
+        return true;
+      }
+    }
     return false;
   }
 }
@@ -492,6 +460,58 @@ async function getTelegramIconPayload(itemId, condition) {
   }
 }
 
+function getConditionColor(condition = 'default') {
+  switch (condition) {
+    case 'above':
+      return 0x10b981; // Green
+    case 'below':
+      return 0xef4444; // Red
+    case 'sold':
+      return 0xf59e0b; // Orange
+    case 'undercut':
+      return 0x8b5cf6;  // Purple 
+    default:
+      return 0x06b6d4; // Cyan
+  }
+}
+
+async function buildEmbedWithIcon(description, itemId, condition, attachmentPrefix = 'alert') {
+  const embed = new EmbedBuilder()
+    .setDescription(description)
+    .setColor(getConditionColor(condition))
+    .setTimestamp();
+
+  let files = undefined;
+  if (itemId) {
+    const payload = await getTelegramIconPayload(itemId, condition);
+    if (payload.type === 'buffer') {
+      const attachmentName = `${attachmentPrefix}-${itemId}-${condition}.png`;
+      files = [new AttachmentBuilder(payload.value, { name: attachmentName })];
+      embed.setImage(`attachment://${attachmentName}`);
+    } else if (payload.value) {
+      embed.setImage(payload.value);
+    }
+  }
+
+  return { embed, files };
+}
+
+async function sendChannelAlert(channel, member, message, itemId, condition) {
+  try {
+    const mentionDescription = `<@${member.user.id}> ${message}`;
+    const { embed, files } = await buildEmbedWithIcon(mentionDescription, itemId, condition, 'channel');
+    const options = { embeds: [embed] };
+    if (files) {
+      options.files = files;
+    }
+    await channel.send(options);
+    return true;
+  } catch (error) {
+    console.error(`Failed to send fallback channel alert for ${member.displayName}:`, error.message);
+    return false;
+  }
+}
+
 // Function to send Telegram message with optional image
 async function sendTelegramMessage(telegramUsername, message, itemId = null, condition = 'above') {
   try {
@@ -511,12 +531,15 @@ async function sendTelegramMessage(telegramUsername, message, itemId = null, con
     // If itemId is provided, send photo with caption
     if (itemId) {
       const payload = await getTelegramIconPayload(itemId, condition);
-      const photoArg = payload.type === 'buffer' ? payload.value : payload.value;
+      const photoArg = payload.value;
+      const fileOptions = payload.type === 'buffer'
+        ? { filename: `telegram-icon-${itemId}-${condition}.png`, contentType: 'image/png' }
+        : undefined;
 
       await telegramBot.sendPhoto(chatId, photoArg, {
         caption: message,
         parse_mode: 'Markdown'
-      });
+      }, fileOptions);
       console.log(`[TELEGRAM] ✅ Photo sent successfully to ${telegramUsername}`);
     } else {
       // Send text-only message
@@ -759,8 +782,9 @@ async function checkPriceAlerts() {
         `Persistence: **${persistentAlert ? 'Keeps until deleted' : 'Auto-remove'}**`
       ].filter(Boolean).join('\n');
 
+      const logUsername = username || alert.discord_username || alert.telegram_username || 'unknown';
       await logTriggeredAlert(
-        alert.discord_username,
+        logUsername,
         'Price Alert',
         logDetails
       );
@@ -925,8 +949,9 @@ async function checkListingSoldNotifications() {
             // Log triggered alert to admin channel
             const alertTypeStr = isFullySold ? 'Listing Sold Out' : 'Listing Sale';
             const logPriceETH = selectedListing.price.toFixed(6).replace(/\.?0+$/, '');
+            const logUsername = username || alert.discord_username || alert.telegram_username || 'unknown';
             await logTriggeredAlert(
-              alert.discord_username,
+              logUsername,
               alertTypeStr,
               `Item: **${selectedListing.item_name}**\nAmount: **${amountSoldSinceLastCheck > 0 ? amountSoldSinceLastCheck : selectedListing.amount}**\nPrice: **${logPriceETH} ETH**`
             );
@@ -1064,8 +1089,9 @@ ${undercutDetails}${undercutListings.length > 3 ? `\n...` : ''}`;
         if (sent) {
           console.log(`[UNDERCUT] Sent to ${username}`);
           const logUserPrice = userPrice.toFixed(6).replace(/\.?0+$/, '');
+          const logUsername = username || alert.discord_username || alert.telegram_username || 'unknown';
           await logTriggeredAlert(
-            alert.discord_username,
+            logUsername,
             'Listing Undercut',
             `${listing.item_name} - ${undercutListings.length} listing${undercutListings.length > 1 ? 's' : ''} below ${logUserPrice} ETH`
           );
