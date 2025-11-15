@@ -457,7 +457,20 @@ async function sendTelegramMessage(telegramUsername, message, itemId = null, con
       // Add cache-busting timestamp to force Telegram to fetch new image
       const cacheBuster = Date.now();
       const imageUrl = `${API_BASE_URL}/api/telegram-icon/${itemId}?condition=${condition}&v=${cacheBuster}`;
-      await telegramBot.sendPhoto(chatId, imageUrl, {
+      let photoPayload = imageUrl;
+      try {
+        const response = await fetch(imageUrl, { headers: { 'X-App-Version': APP_VERSION } });
+        if (response.ok) {
+          const buffer = Buffer.from(await response.arrayBuffer());
+          photoPayload = buffer;
+        } else {
+          console.warn(`[TELEGRAM] Icon fetch ${response.status} - falling back to URL`);
+        }
+      } catch (error) {
+        console.warn('[TELEGRAM] Icon fetch failed, using URL:', error.message);
+      }
+
+      await telegramBot.sendPhoto(chatId, photoPayload, {
         caption: message,
         parse_mode: 'Markdown'
       });
@@ -489,6 +502,11 @@ async function sendNotification(username, message, channel = 'discord', itemId =
   if (channel === 'telegram') {
     return await sendTelegramMessage(username, message, itemId, condition);
   } else {
+    const throttleDelayMs = parseInt(process.env.DISCORD_DM_DELAY_MS || '300', 10);
+    if (throttleDelayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, throttleDelayMs));
+    }
+
     // Discord: Send DM with embed if itemId provided
     const dmSent = await sendDirectMessage(username, message, itemId, condition);
 
@@ -971,6 +989,8 @@ async function checkUndercutNotifications() {
         }
 
         const totalAmount = undercutListings.reduce((sum, ask) => sum + ask.amount, 0);
+        const totalEthValue = undercutListings.reduce((sum, ask) => sum + (ask.amount * ask.price), 0);
+        const totalUsdValue = totalEthValue * ethToUsdRate;
         const topUndercuts = undercutListings.slice(0, 3);
         const undercutDetails = topUndercuts
           .map(ask => {
@@ -985,7 +1005,9 @@ async function checkUndercutNotifications() {
 Your price: **${userPriceFormatted} ETH** ($${(userPrice * ethToUsdRate).toFixed(2)})
 
 **${totalAmount} items** below your price:
-${undercutDetails}${undercutListings.length > 3 ? `\n...` : ''}`;
+${undercutDetails}${undercutListings.length > 3 ? `\n...` : ''}
+
+Undercut volume: **${totalEthValue.toFixed(6).replace(/\.?0+$/, '')} ETH** ($${totalUsdValue.toFixed(2)})`;
 
         // Route notification based on channel
         const username = alert.notification_channel === 'telegram' ? alert.telegram_username : alert.discord_username;
