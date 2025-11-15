@@ -262,8 +262,12 @@ async function sendDirectMessage(discordUsername, message, itemId = null, condit
       throw new Error('Guild not found');
     }
 
-    // Fetch all members to populate cache
-    await guild.members.fetch();
+    // Fetch members to populate cache (best-effort)
+    try {
+      await guild.members.fetch();
+    } catch (fetchError) {
+      console.warn(`[DISCORD] members.fetch failed (${fetchError.message}) - attempting with cached members`);
+    }
 
     // Clean username (remove @ and spaces)
     const cleanUsername = discordUsername.replace(/[@\s]/g, '');
