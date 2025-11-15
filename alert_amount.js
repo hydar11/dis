@@ -4,6 +4,8 @@ const { createClient } = require('@supabase/supabase-js');
 const TelegramBot = require('node-telegram-bot-api');
 const initTelegramCommands = require('./telegram-commands');
 const { APP_VERSION } = require('./version');
+const { ethers } = require('ethers');
+
 // Subgraph query function (same as server.js)
 const SUBGRAPH_URL = process.env.SUBGRAPH_URL;
 const API_BASE_URL = process.env.API_BASE_URL;
@@ -1208,9 +1210,10 @@ async function checkDetailedUndercutNotifications() {
             const avgBuyText = tradeAvgPrice > 0 ? `${avgBuyETH} ($${(tradeAvgPrice * ethToUsdRate).toFixed(2)})` : '0';
             const avgSellText = soldAvgPrice > 0 ? `${avgSellETH} ($${(soldAvgPrice * ethToUsdRate).toFixed(2)})` : '0';
 
-            const ucPriceETH = uc.pricePerItemETH.toFixed(6).replace(/\.?0+$/, '');
+            const ucPrice = Number(ethers.formatEther(uc.pricePerItemETH));
+            const ucPriceETH = ucPrice.toFixed(6).replace(/\.?0+$/, '');
             undercutterDetails.push(
-              `• ${uc.amountRemaining}x - ${ucPriceETH} ETH ($${(uc.pricePerItemETH * ethToUsdRate).toFixed(2)})    |    inventory: ${inventory},   |    avg buy: **${avgBuyText}**,  |   avg sell: **${avgSellText}**,  |   B/S: ${boughtAmount}/${soldAmount}`
+              `• ${uc.amountRemaining}x - ${ucPriceETH} ETH ($${(ucPrice * ethToUsdRate).toFixed(2)})    |    inventory: ${inventory},   |    avg buy: **${avgBuyText}**,  |   avg sell: **${avgSellText}**,  |   B/S: ${boughtAmount}/${soldAmount}`
             );
           }
 
