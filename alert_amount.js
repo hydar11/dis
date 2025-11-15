@@ -404,7 +404,15 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
 
     // Send message in the thread (with embed if itemId provided)
     if (itemId) {
-      const { embed, files } = await buildEmbedWithIcon(`<@${member.user.id}> ${message}`, itemId, condition, 'thread');
+      const perms = channel.permissionsFor(client.user.id);
+      const canAttach = perms ? perms.has('AttachFiles') : false;
+      const { embed, files } = await buildEmbedWithIcon(
+        `<@${member.user.id}> ${message}`,
+        itemId,
+        condition,
+        'thread',
+        { preferAttachment: canAttach }
+      );
       const sendOptions = { embeds: [embed] };
       if (files) {
         sendOptions.files = files;
@@ -475,7 +483,8 @@ function getConditionColor(condition = 'default') {
   }
 }
 
-async function buildEmbedWithIcon(description, itemId, condition, attachmentPrefix = 'alert') {
+async function buildEmbedWithIcon(description, itemId, condition, attachmentPrefix = 'alert', options = {}) {
+  const preferAttachment = options.preferAttachment !== false;
   const embed = new EmbedBuilder()
     .setDescription(description)
     .setColor(getConditionColor(condition))
@@ -484,7 +493,7 @@ async function buildEmbedWithIcon(description, itemId, condition, attachmentPref
   let files = undefined;
   if (itemId) {
     const payload = await getTelegramIconPayload(itemId, condition);
-    if (payload.type === 'buffer') {
+    if (payload.type === 'buffer' && preferAttachment) {
       const attachmentName = `${attachmentPrefix}-${itemId}-${condition}.png`;
       files = [new AttachmentBuilder(payload.value, { name: attachmentName })];
       embed.setImage(`attachment://${attachmentName}`);
@@ -498,8 +507,21 @@ async function buildEmbedWithIcon(description, itemId, condition, attachmentPref
 
 async function sendChannelAlert(channel, member, message, itemId, condition) {
   try {
+    const perms = channel.permissionsFor(client.user.id);
+    if (!perms || !perms.has('SendMessages')) {
+      console.warn(`⚠️ Bot lacks SendMessages in channel ${channel.name}`);
+      return false;
+    }
+
+    const canAttach = perms.has('AttachFiles');
     const mentionDescription = `<@${member.user.id}> ${message}`;
-    const { embed, files } = await buildEmbedWithIcon(mentionDescription, itemId, condition, 'channel');
+    const { embed, files } = await buildEmbedWithIcon(
+      mentionDescription,
+      itemId,
+      condition,
+      'channel',
+      { preferAttachment: canAttach }
+    );
     const options = { embeds: [embed] };
     if (files) {
       options.files = files;
@@ -507,7 +529,7 @@ async function sendChannelAlert(channel, member, message, itemId, condition) {
     await channel.send(options);
     return true;
   } catch (error) {
-    console.error(`Failed to send fallback channel alert for ${member.displayName}:`, error.message);
+    console.error(`Failed to send fallback channel alert for ${member ? member.displayName : 'unknown'}:`, error.message);
     return false;
   }
 }
@@ -531,15 +553,18 @@ async function sendTelegramMessage(telegramUsername, message, itemId = null, con
     // If itemId is provided, send photo with caption
     if (itemId) {
       const payload = await getTelegramIconPayload(itemId, condition);
-      const photoArg = payload.value;
-      const fileOptions = payload.type === 'buffer'
-        ? { filename: `telegram-icon-${itemId}-${condition}.png`, contentType: 'image/png' }
-        : undefined;
+      let photoArg = payload.value;
+      if (payload.type === 'buffer') {
+        photoArg = {
+          value: payload.value,
+          options: { filename: `telegram-icon-${itemId}-${condition}.png`, contentType: 'image/png' }
+        };
+      }
 
       await telegramBot.sendPhoto(chatId, photoArg, {
         caption: message,
         parse_mode: 'Markdown'
-      }, fileOptions);
+      });
       console.log(`[TELEGRAM] ✅ Photo sent successfully to ${telegramUsername}`);
     } else {
       // Send text-only message
