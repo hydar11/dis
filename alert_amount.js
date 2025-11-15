@@ -253,35 +253,53 @@ client.once('ready', () => {
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
 });
 
+function matchesDiscordMember(member, discordUsername, cleanUsername) {
+  const candidates = [
+    member.user.username,
+    member.user.globalName,
+    member.displayName
+  ].filter(Boolean);
+
+  return candidates.some(name =>
+    name === discordUsername ||
+    name === cleanUsername ||
+    name.toLowerCase() === cleanUsername.toLowerCase()
+  );
+}
+
+async function findDiscordMember(discordUsername) {
+  const guild = client.guilds.cache.get(GUILD_ID);
+  if (!guild) {
+    throw new Error('Guild not found');
+  }
+
+  const cleanUsername = discordUsername.replace(/[@\s]/g, '');
+
+  // Try cached members first
+  const cachedMember = guild.members.cache.find(m => matchesDiscordMember(m, discordUsername, cleanUsername));
+  if (cachedMember) {
+    return cachedMember;
+  }
+
+  // Fallback: query Discord for this username (limited subset, so it works even when cache is cold)
+  try {
+    const searchQuery = cleanUsername.slice(0, 32);
+    const fetchedMembers = await guild.members.fetch({ query: searchQuery, limit: 5 });
+    const matched = fetchedMembers.find(m => matchesDiscordMember(m, discordUsername, cleanUsername));
+    if (matched) {
+      return matched;
+    }
+  } catch (error) {
+    console.warn(`[DISCORD] Member fetch query failed for ${discordUsername}: ${error.message}`);
+  }
+
+  return null;
+}
+
 // Function to send DM to user (with optional embed image)
 async function sendDirectMessage(discordUsername, message, itemId = null, condition = 'above') {
   try {
-    // Find user by username
-    const guild = client.guilds.cache.get(GUILD_ID);
-    if (!guild) {
-      throw new Error('Guild not found');
-    }
-
-    // Fetch members to populate cache (best-effort)
-    try {
-      await guild.members.fetch();
-    } catch (fetchError) {
-      console.warn(`[DISCORD] members.fetch failed (${fetchError.message}) - attempting with cached members`);
-    }
-
-    // Clean username (remove @ and spaces)
-    const cleanUsername = discordUsername.replace(/[@\s]/g, '');
-
-    const member = guild.members.cache.find(m =>
-      m.user.username === discordUsername ||
-      m.user.globalName === discordUsername ||
-      m.displayName === discordUsername ||
-      m.user.username === cleanUsername ||
-      m.user.globalName === cleanUsername ||
-      m.displayName === cleanUsername ||
-      m.user.username.toLowerCase() === cleanUsername.toLowerCase() ||
-      m.displayName.toLowerCase() === cleanUsername.toLowerCase()
-    );
+    const member = await findDiscordMember(discordUsername);
 
     if (!member) {
       console.error(`User ${discordUsername} not found in server`);
@@ -326,19 +344,7 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
       throw new Error('Guild not found');
     }
 
-    // Clean username (remove @ and spaces)
-    const cleanUsername = discordUsername.replace(/[@\s]/g, '');
-
-    const member = guild.members.cache.find(m =>
-      m.user.username === discordUsername ||
-      m.user.globalName === discordUsername ||
-      m.displayName === discordUsername ||
-      m.user.username === cleanUsername ||
-      m.user.globalName === cleanUsername ||
-      m.displayName === cleanUsername ||
-      m.user.username.toLowerCase() === cleanUsername.toLowerCase() ||
-      m.displayName.toLowerCase() === cleanUsername.toLowerCase()
-    );
+    const member = await findDiscordMember(discordUsername);
 
     if (!member) {
       console.error(`User ${discordUsername} not found for private thread`);
@@ -451,7 +457,6 @@ async function sendTelegramMessage(telegramUsername, message, itemId = null, con
       // Add cache-busting timestamp to force Telegram to fetch new image
       const cacheBuster = Date.now();
       const imageUrl = `${API_BASE_URL}/api/telegram-icon/${itemId}?condition=${condition}&v=${cacheBuster}`;
-      console.log(`[TELEGRAM] Sending photo to ${telegramUsername} (${chatId}):`, { itemId, condition, imageUrl });
       await telegramBot.sendPhoto(chatId, imageUrl, {
         caption: message,
         parse_mode: 'Markdown'
@@ -459,7 +464,6 @@ async function sendTelegramMessage(telegramUsername, message, itemId = null, con
       console.log(`[TELEGRAM] ✅ Photo sent successfully to ${telegramUsername}`);
     } else {
       // Send text-only message
-      console.log(`[TELEGRAM] Sending text message to ${telegramUsername} (${chatId})`);
       await telegramBot.sendMessage(chatId, message, {
         parse_mode: 'Markdown',
         disable_web_page_preview: true
@@ -530,6 +534,15 @@ async function checkPriceAlerts() {
       fetch('https://gigaverse.io/api/marketplace/item/floor/all').then(res => res.json()),
       getEthToUsdRate()
     ]);
+    const orderbookCache = new Map();
+    const getOrderbookForItem = async (itemId) => {
+      if (orderbookCache.has(itemId)) {
+        return orderbookCache.get(itemId);
+      }
+      const book = await fetchOrderbook(itemId);
+      orderbookCache.set(itemId, book);
+      return book;
+    };
     
     // Helper function to convert wei to ETH then to USD
     function toNumber(bigDecimalStr) {
@@ -558,20 +571,6 @@ async function checkPriceAlerts() {
 
         const priceCondition = selectedItem.price_condition || alert.price_condition || 'below';
 
-        // DEBUG LOG for Telegram alerts
-        if (alert.notification_channel === 'telegram') {
-          console.log(`[TELEGRAM DEBUG] Alert for ${alert.telegram_username}:`, {
-            itemName: selectedItem.name,
-            itemId: selectedItem.id,
-            priceCondition: priceCondition,
-            currentPriceETH: floorPriceETH.toFixed(6),
-            currentPriceUSD: currentPriceUSD.toFixed(2),
-            targetPriceETH: selectedItem.target_price_eth,
-            targetPriceUSD: selectedItem.target_price_usd,
-            channel: alert.notification_channel
-          });
-        }
-
         const usdTargetSource = selectedItem.target_price_usd ?? alert.target_price_usd;
         const ethTargetSource = selectedItem.target_price_eth ?? alert.target_price_eth;
 
@@ -595,18 +594,6 @@ async function checkPriceAlerts() {
           (priceCondition === 'below' && floorPriceETH <= ethTarget)
         );
 
-        // DEBUG LOG for Telegram trigger check
-        if (alert.notification_channel === 'telegram') {
-          console.log(`[TELEGRAM TRIGGER CHECK] ${selectedItem.name}:`, {
-            usdValid: usdValid,
-            ethValid: ethValid,
-            usdTriggered: usdTriggered,
-            ethTriggered: ethTriggered,
-            usdCheck: usdValid ? `${currentPriceUSD.toFixed(2)} ${priceCondition === 'above' ? '>=' : '<='} ${usdTarget}` : 'N/A',
-            ethCheck: ethValid ? `${floorPriceETH.toFixed(6)} ${priceCondition === 'above' ? '>=' : '<='} ${ethTarget}` : 'N/A'
-          });
-        }
-
         if (!usdTriggered && !ethTriggered) {
           continue;
         }
@@ -615,7 +602,7 @@ async function checkPriceAlerts() {
         const minAmount = selectedItem.min_amount || alert.min_amount;
         if (minAmount && minAmount > 0) {
           // Fetch orderbook to count items at trigger price
-          const orderbook = await fetchOrderbook(selectedItem.id);
+          const orderbook = await getOrderbookForItem(selectedItem.id);
 
           let itemCountAtTrigger = 0;
 
@@ -633,10 +620,7 @@ async function checkPriceAlerts() {
               .reduce((sum, ask) => sum + ask.amount, 0);
           }
 
-          console.log(`[AMOUNT CHECK] ${selectedItem.name}: ${itemCountAtTrigger} items at trigger price (min required: ${minAmount})`);
-
           if (itemCountAtTrigger < minAmount) {
-            console.log(`[AMOUNT CHECK] Skipping alert - insufficient items (${itemCountAtTrigger} < ${minAmount})`);
             continue;
           }
 
@@ -694,14 +678,6 @@ async function checkPriceAlerts() {
       const itemId = item.originalItem.id;
       const condition = item.priceCondition; // 'above' or 'below'
 
-      console.log(`[PRICE ALERT] Sending notification:`, {
-        username,
-        channel,
-        itemId,
-        condition,
-        itemName: item.name
-      });
-
       const sent = await sendNotification(username, message, channel, itemId, condition);
       if (!sent) {
         console.error(` Failed to send notification to ${username} (channel: ${channel}) - removing invalid alert`);
@@ -711,7 +687,7 @@ async function checkPriceAlerts() {
           .eq('id', alert.id);
         continue;
       }
-      console.log(`[PRICE ALERT] ✅ Notification sent successfully to ${username}`);
+      console.log(`[PRICE ALERT] Sent to ${username}`);
 
 
       const logDetails = [
@@ -823,8 +799,6 @@ async function checkListingSoldNotifications() {
             const recentTransfer = listing.transfers[listing.transfers.length - 1];
             wasCanceledByOwner = recentTransfer.transferredTo.id === listing.owner.id;
           }
-          console.log(`DEBUG CANCEL CHECK - Listing ${selectedListing.id}: status=${listing.status}, isActive=${listing.isActive}, amountRem=${listing.amountRemaining}, amount=${listing.amount}, canceled=${wasCanceledByOwner}`);
-
           const currentRemaining = listing.amountRemaining || 0;
           const isFullySold = currentRemaining == 0;
 
@@ -837,7 +811,7 @@ async function checkListingSoldNotifications() {
           if (wasCanceledByOwner) {
             shouldRemoveListing = true;
             shouldNotify = false; // Explicitly ensure no notification for cancellations
-            console.log(` Listing ${selectedListing.id} was canceled by owner - removing alert silently`);
+            console.warn(`Listing ${selectedListing.id} canceled by owner. Removing alert entry.`);
 
           // Step 2: If not canceled, evaluate if it was sold.
           } else {
@@ -880,22 +854,12 @@ async function checkListingSoldNotifications() {
             const itemId = selectedListing.item_id;
             const condition = 'sold'; // Listing sold = use telegram_sold.png background
 
-            console.log(`[LISTING SOLD] Sending notification:`, {
-              username,
-              channel,
-              itemId,
-              condition,
-              listingId: selectedListing.id,
-              itemName: selectedListing.item_name
-            });
-
             const sent = await sendNotification(username, message, channel, itemId, condition);
             if (!sent) {
               console.error(` Failed to send listing notification to ${username} (channel: ${channel}) - marking for removal`);
               invalidUser = true;
               break; // Exit the listing loop for this alert
             }
-            console.log(`[LISTING SOLD] ✅ Notification sent successfully to ${username}`);
 
             // Log triggered alert to admin channel
             const alertTypeStr = isFullySold ? 'Listing Sold Out' : 'Listing Sale';
@@ -942,14 +906,12 @@ async function checkListingSoldNotifications() {
             .from('notification_alerts')
             .delete()
             .eq('id', alert.id);
-          console.log(` Successfully deleted alert ${alert.id} - all listings completed`);
         } else {
           // Update alert with remaining active listings (completed ones removed)
           await supabase
             .from('notification_alerts')
             .update({ listing_ids: activeListings })
             .eq('id', alert.id);
-          console.log(` Updated alert ${alert.id} - ${activeListings.length} active listings remaining`);
         }
       }
     }
@@ -961,15 +923,13 @@ async function checkListingSoldNotifications() {
 // Function to check undercut notifications (batched by item)
 async function checkUndercutNotifications() {
   try {
-    console.log(' Checking undercut notifications...');
+    console.log('Checking undercut notifications...');
     const { data: alerts, error } = await supabase
       .from('notification_alerts')
       .select('*')
       .eq('alert_type', 'listing_alert');
 
     if (error) throw error;
-
-    console.log(`Found ${alerts.length} listing alerts`);
 
     const ethToUsdRate = await getEthToUsdRate();
 
@@ -981,360 +941,121 @@ async function checkUndercutNotifications() {
         const types = Array.isArray(listing.notification_types) ? listing.notification_types : [listing.notification_types || 'sold_out'];
 
         const status = listing.status || 'active';
-        console.log(` Listing ${listing.id}: types=${JSON.stringify(types)}, status=${status}, item_id=${listing.item_id}`);
 
-        // For Telegram: check both 'undercut' and 'undercut_detailed' (for backwards compatibility)
-        // For Discord: only check 'undercut' (detailed has its own function)
-        const hasUndercutType = types.includes('undercut') ||
-          (alert.notification_channel === 'telegram' && types.includes('undercut_detailed'));
+        // Simple undercut handler now covers both legacy "undercut" and "undercut_detailed" types
+        const hasUndercutType = types.includes('undercut') || types.includes('undercut_detailed');
 
         if (hasUndercutType && status === 'active') {
           const itemId = listing.item_id;
           if (!itemId) {
-            console.log(` Listing ${listing.id} missing item_id - skipping`);
             continue;
           }
           if (!alertsByItem[itemId]) {
             alertsByItem[itemId] = [];
           }
           alertsByItem[itemId].push({ alert, listing, types });
-          console.log(` Added listing ${listing.id} for item ${itemId} to undercut check`);
         }
       }
     }
 
-    console.log(` Grouped into ${Object.keys(alertsByItem).length} unique items`);
-
     // Process each item's orderbook once
     for (const [itemId, items] of Object.entries(alertsByItem)) {
-      console.log(` Fetching orderbook for item ${itemId}...`);
       const orderbook = await fetchOrderbook(itemId);
-      console.log(` Orderbook has ${orderbook.length} price levels`);
 
       for (const { alert, listing, types } of items) {
-        console.log(` Raw listing.price: ${listing.price} (type: ${typeof listing.price})`);
         const userPrice = parseFloat(listing.price);
-        console.log(` Parsed userPrice: ${userPrice} (type: ${typeof userPrice})`);
         const undercutListings = orderbook.filter(ask => ask.price < userPrice);
 
-        console.log(` Listing ${listing.id} price: ${userPrice.toFixed(6)} ETH, found ${undercutListings.length} undercuts`);
+        if (undercutListings.length === 0) {
+          continue;
+        }
 
-        if (undercutListings.length > 0) {
-          console.log(` UNDERCUT DETECTED for listing ${listing.id}!`);
+        const totalAmount = undercutListings.reduce((sum, ask) => sum + ask.amount, 0);
+        const topUndercuts = undercutListings.slice(0, 3);
+        const undercutDetails = topUndercuts
+          .map(ask => {
+            const priceETH = ask.price.toFixed(6).replace(/\.?0+$/, '');
+            return `${ask.amount}x - ${priceETH} ETH ($${(ask.price * ethToUsdRate).toFixed(2)})`;
+          })
+          .join('\n');
 
-          // Calculate total amount below user price
-          const totalAmount = undercutListings.reduce((sum, ask) => sum + ask.amount, 0);
-
-          // Show top 3 price levels
-         // Assuming this is inside an async function
-const topUndercuts = undercutListings.slice(0, 3);
-const undercutDetails = topUndercuts
-  .map(ask => {
-    const priceETH = ask.price.toFixed(6).replace(/\.?0+$/, '');
-    return `${ask.amount}x - ${priceETH} ETH ($${(ask.price * ethToUsdRate).toFixed(2)})`;
-  })
-  .join('\n');
-
-const userPriceFormatted = userPrice.toFixed(6).replace(/\.?0+$/, '');
-const message = `🪓 **Price Undercut** 🪓
+        const userPriceFormatted = userPrice.toFixed(6).replace(/\.?0+$/, '');
+        const message = `🪓 **Price Undercut** 🪓
 **${listing.item_name}**
 Your price: **${userPriceFormatted} ETH** ($${(userPrice * ethToUsdRate).toFixed(2)})
 
 **${totalAmount} items** below your price:
 ${undercutDetails}${undercutListings.length > 3 ? `\n...` : ''}`;
 
-// Route notification based on channel
-const username = alert.notification_channel === 'telegram' ? alert.telegram_username : alert.discord_username;
-const channel = alert.notification_channel || 'discord';
-const itemId = listing.item_id;
-const condition = 'undercut'; // Undercut = use telegram_undercat.png background
+        // Route notification based on channel
+        const username = alert.notification_channel === 'telegram' ? alert.telegram_username : alert.discord_username;
+        const channel = alert.notification_channel || 'discord';
+        const listingItemId = listing.item_id;
+        const condition = 'undercut'; // Undercut = use telegram_undercat.png background
 
-console.log(`[UNDERCUT] Sending notification:`, {
-  username,
-  channel,
-  itemId,
-  condition,
-  listingId: listing.id,
-  itemName: listing.item_name
-});
+        const sent = await sendNotification(username, message, channel, listingItemId, condition);
 
-const sent = await sendNotification(username, message, channel, itemId, condition);
+        if (sent) {
+          console.log(`[UNDERCUT] Sent to ${username}`);
+          const logUserPrice = userPrice.toFixed(6).replace(/\.?0+$/, '');
+          await logTriggeredAlert(
+            alert.discord_username,
+            'Listing Undercut',
+            `${listing.item_name} - ${undercutListings.length} listing${undercutListings.length > 1 ? 's' : ''} below ${logUserPrice} ETH`
+          );
+        } else {
+          console.warn(`[UNDERCUT] Failed to notify ${username}`);
+          continue;
+        }
 
-if (sent) {
-  console.log(`[UNDERCUT] ✅ Notification sent successfully to ${username}`);
-  const logUserPrice = userPrice.toFixed(6).replace(/\.?0+$/, '');
-  await logTriggeredAlert(
-    alert.discord_username,
-    'Listing Undercut',
-    `${listing.item_name} - ${undercutListings.length} listing${undercutListings.length > 1 ? 's' : ''} below ${logUserPrice} ETH`
-  );
+        // Update status - mark undercut as sent
+        const currentStatus = listing.status || 'active';
+        const hasSoldOut = types.includes('sold_out');
+        const hasAllTrades = types.includes('all_trade') || types.includes('both');
+        const shouldRemoveFromDB = !hasSoldOut && !hasAllTrades;
+        const newStatus = shouldRemoveFromDB ? 'completed' : 'undercut_sent';
 
+        if (shouldRemoveFromDB) {
+          // Remove this specific listing from the alert
+          const updatedListings = alert.listing_ids.filter(l => l.id !== listing.id);
 
-            // Update status - mark undercut as sent
-            console.log(` Original types for listing ${listing.id}:`, types);
-            const currentStatus = listing.status || 'active';
+          if (updatedListings.length === 0) {
+            const { error: deleteError } = await supabase
+              .from('notification_alerts')
+              .delete()
+              .eq('id', alert.id);
 
-            // Simple logic: remove from DB ONLY if no sold_out or all_trades
-            const hasSoldOut = types.includes('sold_out');
-            const hasAllTrades = types.includes('all_trade') || types.includes('both');
-            const shouldRemoveFromDB = !hasSoldOut && !hasAllTrades;
-
-            const newStatus = shouldRemoveFromDB ? 'completed' : 'undercut_sent';
-
-            console.log(` Status transition: ${currentStatus} -> ${newStatus} (shouldRemove: ${shouldRemoveFromDB})`);
-
-            console.log(` Status transition: ${currentStatus} -> ${newStatus} (shouldRemove: ${shouldRemoveFromDB})`);
-
-            if (shouldRemoveFromDB) {
-              // Remove this specific listing from the alert
-              const updatedListings = alert.listing_ids.filter(l => l.id !== listing.id);
-
-              if (updatedListings.length === 0) {
-                // Delete entire alert if no listings remain
-                const { error: deleteError } = await supabase
-                  .from('notification_alerts')
-                  .delete()
-                  .eq('id', alert.id);
-
-                if (deleteError) {
-                  console.error(` Failed to delete alert ${alert.id}:`, deleteError);
-                } else {
-                  console.log(` Successfully deleted alert ${alert.id} - undercut-only listing completed`);
-                }
-              } else {
-                // Update with remaining listings
-                const { error: updateError } = await supabase
-                  .from('notification_alerts')
-                  .update({ listing_ids: updatedListings })
-                  .eq('id', alert.id);
-
-                if (updateError) {
-                  console.error(` Failed to update alert ${alert.id}:`, updateError);
-                } else {
-                  console.log(` Successfully removed undercut-only listing ${listing.id} from alert ${alert.id}`);
-                }
-              }
-            } else {
-              // Keep listing but update status
-              const updatedListings = alert.listing_ids.map(l =>
-                l.id === listing.id ? { ...l, status: newStatus } : l
-              );
-
-              const { error: updateError } = await supabase
-                .from('notification_alerts')
-                .update({ listing_ids: updatedListings })
-                .eq('id', alert.id);
-
-              if (updateError) {
-                console.error(`[ERROR] Failed to update alert ${alert.id}:`, updateError);
-              } else {
-                console.log(` Successfully updated alert ${alert.id} - listing ${listing.id} status: ${newStatus}`);
-              }
+            if (deleteError) {
+              console.error(` Failed to delete alert ${alert.id}:`, deleteError);
             }
+          } else {
+            const { error: updateError } = await supabase
+              .from('notification_alerts')
+              .update({ listing_ids: updatedListings })
+              .eq('id', alert.id);
+
+            if (updateError) {
+              console.error(` Failed to update alert ${alert.id}:`, updateError);
+            }
+          }
+        } else {
+          const updatedListings = alert.listing_ids.map(l =>
+            l.id === listing.id ? { ...l, status: newStatus } : l
+          );
+
+          const { error: updateError } = await supabase
+            .from('notification_alerts')
+            .update({ listing_ids: updatedListings })
+            .eq('id', alert.id);
+
+          if (updateError) {
+            console.error(`[ERROR] Failed to update alert ${alert.id}:`, updateError);
           }
         }
       }
     }
   } catch (error) {
     console.error('Error checking undercut notifications:', error);
-  }
-}
-
-// Check detailed undercut notifications with PNL data
-async function checkDetailedUndercutNotifications() {
-  try {
-    console.log(' Checking detailed undercut notifications...');
-    const { data: alerts, error } = await supabase
-      .from('notification_alerts')
-      .select('*')
-      .eq('alert_type', 'listing_alert');
-
-    if (error) throw error;
-
-    const ethToUsdRate = await getEthToUsdRate();
-    const alertsByItem = {};
-
-    for (const alert of alerts) {
-      // Skip detailed undercut for Telegram users - they only get simple undercut
-      if (alert.notification_channel === 'telegram') {
-        continue;
-      }
-
-      for (const listing of (alert.listing_ids || [])) {
-        const types = Array.isArray(listing.notification_types) ? listing.notification_types : [listing.notification_types || 'sold_out'];
-
-        const status = listing.status || 'active';
-
-        if (types.includes('undercut_detailed') && ['active', 'undercut_sent'].includes(status)) {
-          const itemId = listing.item_id;
-          if (!itemId) continue;
-          if (!alertsByItem[itemId]) {
-            alertsByItem[itemId] = [];
-          }
-          alertsByItem[itemId].push({ alert, listing, types });
-        }
-      }
-    }
-
-    console.log(` Detailed undercut: ${Object.keys(alertsByItem).length} unique items`);
-
-    for (const [currentItemId, items] of Object.entries(alertsByItem)) {
-      console.log(` Fetching listings for item ${currentItemId}...`);
-      const listings = await fetchListingsForItem(currentItemId);
-
-      for (const { alert, listing, types } of items) {
-        const userPrice = parseFloat(listing.price);
-        console.log(` Detailed check: listing ${listing.id}, price ${userPrice}, found ${listings.length} total listings`);
-        const undercutters = listings.filter(l => l.pricePerItemETH < userPrice);
-        console.log(` Found ${undercutters.length} undercutters for listing ${listing.id}`);
-
-        if (undercutters.length > 0) {
-          console.log(`🚨 DETAILED UNDERCUT for listing ${listing.id}!`);
-
-          const totalAmount = undercutters.reduce((sum, uc) => sum + uc.amountRemaining, 0);
-
-          const undercutterDetails = [];
-          for (const uc of undercutters.slice(0, 5)) {
-            const pnl = await fetchUserPnL(uc.owner, currentItemId);
-            const invResponse = await fetch(`${API_BASE_URL}/api/player-inventory/${uc.owner}`, {
-              headers: { 'X-App-Version': APP_VERSION }
-            });
-            const invData = await invResponse.json();
-            const entities = invData.data?.entities || [];
-            const invItem = entities.find(i => i.ID_CID === currentItemId.toString());
-            const inventory = invItem ? parseInt(invItem.BALANCE_CID) : 0;
-
-            const boughtAmount = pnl?.totalPurchased || 0;
-            const soldAmount = pnl?.totalSold || 0;
-            const tradeAvgPrice = boughtAmount > 0 ? (pnl?.avgPurchasePriceETH || 0) : 0;
-            const soldAvgPrice = pnl?.avgSalePriceETH || 0;
-
-            const avgBuyETH = tradeAvgPrice > 0 ? tradeAvgPrice.toFixed(6).replace(/\.?0+$/, '') : '0';
-            const avgSellETH = soldAvgPrice > 0 ? soldAvgPrice.toFixed(6).replace(/\.?0+$/, '') : '0';
-            const avgBuyText = tradeAvgPrice > 0 ? `${avgBuyETH} ($${(tradeAvgPrice * ethToUsdRate).toFixed(2)})` : '0';
-            const avgSellText = soldAvgPrice > 0 ? `${avgSellETH} ($${(soldAvgPrice * ethToUsdRate).toFixed(2)})` : '0';
-
-            let ucPrice;
-            if (typeof uc.pricePerItemETH === 'string' || typeof uc.pricePerItemETH === 'number') {
-              ucPrice = parseFloat(uc.pricePerItemETH);
-            } else {
-              // Fallback for BigNumber-like values
-              ucPrice = Number(ethers.formatEther(uc.pricePerItemETH));
-            }
-            const ucPriceETH = ucPrice.toFixed(6).replace(/\.?0+$/, '');
-            undercutterDetails.push(
-              `• ${uc.amountRemaining}x - ${ucPriceETH} ETH ($${(ucPrice * ethToUsdRate).toFixed(2)})    |    inventory: ${inventory},   |    avg buy: **${avgBuyText}**,  |   avg sell: **${avgSellText}**,  |   B/S: ${boughtAmount}/${soldAmount}`
-            );
-          }
-
-
-                    const userPriceDetailedFormatted = userPrice.toFixed(6).replace(/\.?0+$/, '');
-                    let message = `🪓 **Detailed Price Undercut** 🪓
-**${listing.item_name}**
-Your price: **${userPriceDetailedFormatted} ETH** ($${(userPrice * ethToUsdRate).toFixed(2)})
-
-**${undercutters.length} listing${undercutters.length > 1 ? 's' : ''}** with **${totalAmount} items** below your price:
-${undercutterDetails.join('\n')}`;
-         
-          
-          if (undercutters.length > 5) {
-            message += `\n...and ${undercutters.length - 5} more`;
-          }
-
-          // Route notification based on channel
-          const username = alert.notification_channel === 'telegram' ? alert.telegram_username : alert.discord_username;
-          const channel = alert.notification_channel || 'discord';
-          const listingItemId = listing.item_id; // Renamed to avoid conflict with outer loop variable
-          const condition = 'undercut'; // Detailed undercut = use telegram_undercat.png background
-
-          console.log(`[DETAILED UNDERCUT] Sending notification:`, {
-            username,
-            channel,
-            itemId: listingItemId,
-            condition,
-            listingId: listing.id,
-            itemName: listing.item_name
-          });
-
-          const sent = await sendNotification(username, message, channel, listingItemId, condition);
-
-            if (sent) {
-              console.log(`[DETAILED UNDERCUT] ✅ Notification sent successfully to ${username}`);
-              await logTriggeredAlert(
-                alert.discord_username,
-                'Detailed Listing Undercut',
-                `${listing.item_name} - ${undercutters.length} listings with PNL data`
-              );
-
-
-
-
-              
-            // Update status - mark detailed as sent
-            console.log(` [DETAILED] Original types for listing ${listing.id}:`, types);
-            const currentStatus = listing.status || 'active';
-
-            // Simple logic: remove from DB ONLY if no sold_out or all_trades
-            const hasSoldOut = types.includes('sold_out');
-            const hasAllTrades = types.includes('all_trade') || types.includes('both');
-            const shouldRemoveFromDB = !hasSoldOut && !hasAllTrades;
-
-            const newStatus = shouldRemoveFromDB ? 'completed' : 'detailed_sent';
-
-            console.log(` [DETAILED] Status transition: ${currentStatus} -> ${newStatus} (shouldRemove: ${shouldRemoveFromDB})`);
-
-            if (shouldRemoveFromDB) {
-              // Remove this specific listing from the alert
-              const updatedListings = alert.listing_ids.filter(l => l.id !== listing.id);
-
-              if (updatedListings.length === 0) {
-                // Delete entire alert if no listings remain
-                const { error: deleteError } = await supabase
-                  .from('notification_alerts')
-                  .delete()
-                  .eq('id', alert.id);
-
-                if (deleteError) {
-                  console.error(` [DETAILED] Failed to delete alert ${alert.id}:`, deleteError);
-                } else {
-                  console.log(` [DETAILED] Successfully deleted alert ${alert.id} - detailed-only listing completed`);
-                }
-              } else {
-                // Update with remaining listings
-                const { error: updateError } = await supabase
-                  .from('notification_alerts')
-                  .update({ listing_ids: updatedListings })
-                  .eq('id', alert.id);
-
-                if (updateError) {
-                  console.error(` [DETAILED] Failed to update alert ${alert.id}:`, updateError);
-                } else {
-                  console.log(` [DETAILED] Successfully removed detailed-only listing ${listing.id} from alert ${alert.id}`);
-                }
-              }
-            } else {
-              // Keep listing but update status
-              const updatedListings = alert.listing_ids.map(l =>
-                l.id === listing.id ? { ...l, status: newStatus } : l
-              );
-
-              const { error: updateError } = await supabase
-                .from('notification_alerts')
-                .update({ listing_ids: updatedListings })
-                .eq('id', alert.id);
-
-              if (updateError) {
-                console.error(`[ERROR] [DETAILED] Failed to update alert ${alert.id}:`, updateError);
-              } else {
-                console.log(` [DETAILED] Successfully updated alert ${alert.id} - listing ${listing.id} status: ${newStatus}`);
-              }
-            }
-          }
-        }
-      }
-    }
-  } catch (error) {
-    console.error('Error checking detailed undercut notifications:', error);
   }
 }
 
@@ -1354,8 +1075,7 @@ async function runMonitoringCycle() {
     await Promise.allSettled([
       runSafeCheck('Price Alerts', checkPriceAlerts),
       runSafeCheck('Listing Notifications', checkListingSoldNotifications),
-      runSafeCheck('Undercut Notifications', checkUndercutNotifications),
-      runSafeCheck('Detailed Undercut Notifications', checkDetailedUndercutNotifications)
+      runSafeCheck('Undercut Notifications', checkUndercutNotifications)
     ]);
   } catch (error) {
     console.error(' Fatal error in monitoring cycle:', error);
@@ -1367,10 +1087,10 @@ let monitoringInterval = null;
 function startNotificationMonitoring() {
   // Clear existing interval if any
   if (monitoringInterval) {
-    console.log(' Restarting notification monitoring...');
+    console.log('Restarting notification monitoring...');
     clearInterval(monitoringInterval);
   } else {
-    console.log(' Starting notification monitoring...');
+    console.log('Starting notification monitoring...');
   }
 
   // Run immediately first time
@@ -1397,7 +1117,7 @@ function startNotificationMonitoring() {
     }
   }, 5 * 60 * 1000); // 5 minutes
 
-  console.log(` Monitoring interval set (every 5 minutes)`);
+  console.log('Monitoring interval set (every 5 minutes)');
 }
 
 // Add reconnection handling with auto-recovery
