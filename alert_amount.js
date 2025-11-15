@@ -1210,7 +1210,13 @@ async function checkDetailedUndercutNotifications() {
             const avgBuyText = tradeAvgPrice > 0 ? `${avgBuyETH} ($${(tradeAvgPrice * ethToUsdRate).toFixed(2)})` : '0';
             const avgSellText = soldAvgPrice > 0 ? `${avgSellETH} ($${(soldAvgPrice * ethToUsdRate).toFixed(2)})` : '0';
 
-            const ucPrice = Number(ethers.formatEther(uc.pricePerItemETH));
+            let ucPrice;
+            if (typeof uc.pricePerItemETH === 'string' || typeof uc.pricePerItemETH === 'number') {
+              ucPrice = parseFloat(uc.pricePerItemETH);
+            } else {
+              // Fallback for BigNumber-like values
+              ucPrice = Number(ethers.formatEther(uc.pricePerItemETH));
+            }
             const ucPriceETH = ucPrice.toFixed(6).replace(/\.?0+$/, '');
             undercutterDetails.push(
               `• ${uc.amountRemaining}x - ${ucPriceETH} ETH ($${(ucPrice * ethToUsdRate).toFixed(2)})    |    inventory: ${inventory},   |    avg buy: **${avgBuyText}**,  |   avg sell: **${avgSellText}**,  |   B/S: ${boughtAmount}/${soldAmount}`
