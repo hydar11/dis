@@ -3,9 +3,10 @@ const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const TelegramBot = require('node-telegram-bot-api');
 const initTelegramCommands = require('./telegram-commands');
-
+const { APP_VERSION } = require('./version');
 // Subgraph query function (same as server.js)
 const SUBGRAPH_URL = process.env.SUBGRAPH_URL;
+const API_BASE_URL = process.env.API_BASE_URL;
 
 async function querySubgraph(query, variables = {}) {
   const response = await fetch(SUBGRAPH_URL, {
@@ -61,8 +62,9 @@ async function getEthToUsdRate() {
 // Fetch orderbook for an item (aggregated price levels)
 async function fetchOrderbook(itemId) {
   try {
-    const API_URL = 'https://juiced.sh';
-    const response = await fetch(`${API_URL}/api/orderbook/${itemId}`);
+    const response = await fetch(`${API_BASE_URL}/api/orderbook/${itemId}`, {
+      headers: { 'X-App-Version': APP_VERSION }
+    });
     if (!response.ok) {
       throw new Error(`Orderbook API error: ${response.status}`);
     }
@@ -77,8 +79,9 @@ async function fetchOrderbook(itemId) {
 // Fetch listings for an item with owner info
 async function fetchListingsForItem(itemId) {
   try {
-    const API_URL = 'https://juiced.sh';
-    const response = await fetch(`${API_URL}/api/listings?itemId=${itemId}`);
+    const response = await fetch(`${API_BASE_URL}/api/listings?itemId=${itemId}`, {
+      headers: { 'X-App-Version': APP_VERSION }
+    });
     if (!response.ok) {
       throw new Error(`Listings API error: ${response.status}`);
     }
@@ -93,8 +96,9 @@ async function fetchListingsForItem(itemId) {
 // Fetch PNL data for a user address
 async function fetchUserPnL(address, itemId) {
   try {
-    const API_URL = 'https://juiced.sh';
-    const response = await fetch(`${API_URL}/api/user-pnl/${address}`);
+    const response = await fetch(`${API_BASE_URL}/api/user-pnl/${address}`, {
+      headers: { 'X-App-Version': APP_VERSION }
+    });
     if (!response.ok) {
       throw new Error(`PNL API error: ${response.status}`);
     }
@@ -242,7 +246,7 @@ if (telegramBot) {
   initTelegramCommands(telegramBot, supabase);
 }
 
-// Discord bot ready event
+// Discord bot ready event (using clientReady to avoid deprecation warning)
 client.once('ready', () => {
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
 });
@@ -280,7 +284,7 @@ async function sendDirectMessage(discordUsername, message, itemId = null, condit
 
     // If itemId is provided, send embed with image
     if (itemId) {
-      const imageUrl = `https://juiced.sh/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
+      const imageUrl = `${API_BASE_URL}/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
 
       // Determine embed color based on condition
       let embedColor = 0x8b5cf6; // Purple default
@@ -392,7 +396,7 @@ async function findOrCreatePrivateThread(discordUsername, message, itemId = null
 
     // Send message in the thread (with embed if itemId provided)
     if (itemId) {
-      const imageUrl = `https://juiced.sh/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
+      const imageUrl = `${API_BASE_URL}/api/telegram-icon/${itemId}?condition=${condition}&v=${Date.now()}`;
 
       // Determine embed color based on condition
       let embedColor = 0x8b5cf6; // Purple default
@@ -440,7 +444,7 @@ async function sendTelegramMessage(telegramUsername, message, itemId = null, con
     if (itemId) {
       // Add cache-busting timestamp to force Telegram to fetch new image
       const cacheBuster = Date.now();
-      const imageUrl = `https://juiced.sh/api/telegram-icon/${itemId}?condition=${condition}&v=${cacheBuster}`;
+      const imageUrl = `${API_BASE_URL}/api/telegram-icon/${itemId}?condition=${condition}&v=${cacheBuster}`;
       console.log(`[TELEGRAM] Sending photo to ${telegramUsername} (${chatId}):`, { itemId, condition, imageUrl });
       await telegramBot.sendPhoto(chatId, imageUrl, {
         caption: message,
@@ -1186,7 +1190,9 @@ async function checkDetailedUndercutNotifications() {
           const undercutterDetails = [];
           for (const uc of undercutters.slice(0, 5)) {
             const pnl = await fetchUserPnL(uc.owner, currentItemId);
-            const invResponse = await fetch(`https://juiced.sh/api/player-inventory/${uc.owner}`);
+            const invResponse = await fetch(`${API_BASE_URL}/api/player-inventory/${uc.owner}`, {
+              headers: { 'X-App-Version': APP_VERSION }
+            });
             const invData = await invResponse.json();
             const entities = invData.data?.entities || [];
             const invItem = entities.find(i => i.ID_CID === currentItemId.toString());
@@ -1456,7 +1462,7 @@ async function loginWithRetry() {
   }
 }
 
-// Handle ready event with monitoring restart
+// Handle ready event with monitoring restart (using clientReady to avoid deprecation warning)
 client.on('ready', () => {
   console.log(` Discord bot ready as ${client.user.tag}`);
   console.log(` Guild cache: ${client.guilds.cache.size} guilds`);
